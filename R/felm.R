@@ -1,4 +1,3 @@
-# $Id: felm.R 1709 2015-05-26 09:12:20Z sgaure $
 # makematrix is a bit complicated. The purpose is to make model matrices for the various
 # parts of the formulas.  The complications are due to the iv stuff.
 # If there's an IV-part, its right hand side should be with the
@@ -7,7 +6,7 @@
 
 
 makematrix <- function(mf, contrasts=NULL, pf=parent.frame(),
-                       clustervar=NULL, wildcard='n') {
+                       clustervar=NULL, wildcard='n', onlymm=FALSE) {
   m <- match(c("formula", "data", "subset", "na.action"), names(mf), 0L)
   wpos <- which(!is.na(pmatch(names(mf),'weights')))
   if(length(wpos) > 0) {
@@ -112,8 +111,9 @@ makematrix <- function(mf, contrasts=NULL, pf=parent.frame(),
   }
 
   mf <- eval(mf, dataenv)
-
+    
   if(nrow(mf) == 0) stop('0 (non-NA) cases; no valid data')
+
   rm(dataenv)
   naact <- na.action(mf)
   if(!is.null(naact) && !is.null(weights)) weights <- weights[-naact]
@@ -132,27 +132,77 @@ makematrix <- function(mf, contrasts=NULL, pf=parent.frame(),
   # which we evaluate in the frame
   # make a function for ':'
   env <- new.env(parent = formenv)
-# make  ':' a function of two arguments to do the interaction.
-  assign(':', function(a,b) {
-    anam <- deparse(substitute(a))
-    bnam <- deparse(substitute(b))
-    if(is.factor(a) && is.factor(b)) ret <- structure(interaction(a,b,drop=TRUE),xnam=bnam,fnam=anam)
-    else if(is.factor(b)) ret <- structure(factor(b),x=a,xnam=anam,fnam=bnam)
-    else if(is.factor(a)) ret <- structure(factor(a),x=b,xnam=bnam,fnam=anam)
-    else stop('Error in term ',anam,':',bnam,'. Neither ',anam, ' nor ',bnam,' is a factor')
-    ret
-  }, env)
-
+# make  '*' a function of two arguments to do the interaction.
+#  assign(':', function(a,b) {
+#    anam <- deparse(substitute(a))
+#    bnam <- deparse(substitute(b))
+#    message(' call : ',anam, ':' ,bnam)
+#    if(is.factor(a) && is.factor(b)) ret <- structure(interaction(a,b,drop=TRUE),xnam=bnam,fnam=anam)
+#    else if(is.factor(b)) ret <- structure(factor(b),x=a,xnam=anam,fnam=bnam)
+#    else if(is.factor(a)) ret <- structure(factor(a),x=b,xnam=bnam,fnam=anam)
+#    else stop('Error in term ',anam,':',bnam,'. Neither ',anam, ' nor ',bnam,' is a factor')
+#    ret
+#  }, env)
 #  fl <- eval(attr(ftm,'variables'), mf, env)
+  vmat <- attr(ftm,'factors')
+
   fl <- lapply(attr(ftm,'term.labels'), function(tm) {
-    f <- eval(parse(text=tm), mf, env)
-    if(is.null(attr(f, 'fnam'))) factor(f) else f
+    # function for finding a factor name in the model frame.
+    # It's really just to do mf[[n]], but in case of non-syntactical names like `a+b`,
+    # the index name in mf is "a+b", whereas it's "`a+b'" in the terms object
+    # so we must remove backticks before trying.
+    gv <- function(n) mf[[sub('^`(.*)`$','\\1',n)]]
+    f <- gv(tm)
+
+    # if it's a variable and only occurs in one term, pass it on
+    if(!is.null(f) && sum(vmat[tm,] > 0) == 1) return(structure(factor(f),fnam=tm))
+#    if(!is.null(f)) return(structure(factor(f),fnam=tm))
+    # It's an interaction of some sort, find the variables in the interaction
+    vars <- attr(ftm,'factors')[,tm]
+    vars <- vars[vars != 0]
+    nm <- names(vars)
+    # find the factors
+    isfac <- sapply(nm, function(n) is.factor(gv(n)))
+    xx <- names(vars)[which(!isfac)]
+    if(length(xx) > 1) stop('Interaction only allowed for one non-factor')
+    # interact the factors
+    # remove a reference level from the ones which are 1
+    hasref <- vars == 1
+    noref <- vars == 2
+    
+    # find the reference, we choose the largest level
+    reffac <- which(isfac & hasref)
+    namref <- names(vars[reffac])
+    reflev <- sapply(namref, function(n) which(names(which.max(table(gv(n)))) %in% levels(gv(n))))
+    names(reflev) <- namref
+    # make a list with the reference level replaced
+    if(length(xx) == 0) {
+#      rflist <- lapply(namref, function(n) {f <- mf[[n]]; levels(f)[[1]] <- NA; f})
+      if(length(namref) == 1 && sum(noref&isfac) == 0)
+          rflist <- list(gv(namref))
+      else
+          rflist <- lapply(namref, function(n) {f <- gv(n); levels(f)[[reflev[[n]]]] <- NA; f})
+      names(rflist) <- namref
+      f <- addNA(do.call(interaction,c(rflist,lapply(names(vars[noref&isfac]), function(n) gv(n)), drop=TRUE)),
+                 ifany=TRUE)
+      refnam <- paste(sapply(namref, function(n) levels(gv(n))[reflev[n]]), collapse='+')
+      levels(f)[is.na(levels(f))] <- refnam
+#      structure(f, fnam=names(vars)[1], xnam=paste(names(vars)[-1],collapse=':'))
+      structure(f, fnam=paste(names(vars),collapse=':'))
+    } else {
+      f <- do.call(interaction,c(mf[names(vars)[isfac]], drop=TRUE))
+      f <- f[!is.na(f)]
+      structure(f,fnam=paste(names(vars[isfac]),collapse=':'), x=mf[[xx]], xnam=xx)
+    }
+    #    f <- eval(parse(text=tm), mf, env)
+#    if(is.null(attr(f, 'fnam'))) factor(f) else f
   })
   names(fl) <- attr(ftm, 'term.labels')
+
   # Name the interactions with the matrix first, then the factor name
   names(fl) <- sapply(names(fl), function(n) {
     f <- fl[[n]]
-    x <- attr(f,'x')
+    x <- attr(f,'x',exact=TRUE)
     if(is.null(x)) return(n)
     return(paste(attr(f,'xnam'),attr(f,'fnam'), sep=':'))
   })
@@ -249,22 +299,29 @@ makematrix <- function(mf, contrasts=NULL, pf=parent.frame(),
 
   rm(mf) # save some memory
 
+  mm <- list(x=x, y=y, ivx=ivx, ivy=ivy, ctrl=ctrl, fl=fl, weights=weights)
+  mm$extra <- list(icpt=icpt,xterms=xterms,cluster=cluster,Form=Form,ivform=ivform,
+                   inames=inames,naact=naact)
+  if(onlymm) return(mm)
+  mmdemean(mm)
+}
+
+mmdemean <- function(mm) {
   # orig is necessary to compute the r.residuals, i.e. residuals without dummies
   # it's used in getfe() and btrap, but is of no use if we have ctrl variables
-  if(is.null(weights))
-      TSS <- apply(y,2,var)*(nrow(y)-1)
+  if(is.null(mm$weights))
+      TSS <- apply(mm$y,2,var)*(nrow(mm$y)-1)
   else
-      TSS <- apply(y, 2, function(yy) sum( weights^2*(yy-sum(weights^2*yy/sum(weights^2)))^2))
-  names(TSS) <- colnames(y)
+      TSS <- apply(mm$y, 2, function(yy) sum( mm$weights^2*(yy-sum(mm$weights^2*yy/sum(mm$weights^2)))^2))
+  names(TSS) <- colnames(mm$y)
 
-
-  if(length(fl) != 0) {
-    result <- demeanlist(list(y=y, x=x, ivy=ivy, ivx=ivx, ctrl=ctrl), fl=fl,weights=weights)
-    if(is.null(ctrl)) result$orig <- list(y=y, x=x, ivy=ivy, ivx=ivx)
+  if(length(mm$fl) != 0) {
+    result <- demeanlist(list(y=mm$y, x=mm$x, ivy=mm$ivy, ivx=mm$ivx, ctrl=mm$ctrl),
+                         fl=mm$fl,weights=mm$weights)
+    if(is.null(mm$ctrl)) result$orig <- list(y=mm$y, x=mm$x, ivy=mm$ivy, ivx=mm$ivx)
   } else {
-    result <- list(y=y, x=x, ivy=ivy, ivx=ivx, ctrl=ctrl)
+    result <- list(y=mm$y, x=mm$x, ivy=mm$ivy, ivx=mm$ivx, ctrl=mm$ctrl)
   }
-  rm(x,y,ivx,ivy,ctrl)  
 
   if(!is.null(result$ctrl)) {
     # pure control variables to project out
@@ -274,7 +331,7 @@ makematrix <- function(mf, contrasts=NULL, pf=parent.frame(),
     result$ctrl <- NULL
 #    fit <- .lm.fit(x,y)
 # my own is much faster for large datasets
-    fit <- newols(list(y=y,x=x,weights=weights), nostats=TRUE)
+    fit <- newols(list(y=y,x=x,weights=mm$weights), nostats=TRUE)
     resid <- as.matrix(fit$residuals)
     setdimnames(resid, list(NULL, colnames(y)))
     numctrl <- fit$rank
@@ -290,23 +347,23 @@ makematrix <- function(mf, contrasts=NULL, pf=parent.frame(),
   }
 
   result$TSS <- TSS
-  result$hasicpt <- icpt
+  result$hasicpt <- mm$extra$icpt
   result$numctrl <- numctrl
-  result$ctrlnames <- ctrlnames
-  result$fl <- fl
-  result$terms <- xterms
-  result$cluster <- cluster
-  result$formula <- Form
-  result$ivform <- ivform
-  result$inames <- inames
-  result$na.action <- naact
-  result$weights <- weights
+  result$ctrlnames <- colnames(mm$ctrl)
+  result$fl <- mm$fl
+  result$terms <- mm$extra$xterms
+  result$cluster <- mm$extra$cluster
+  result$formula <- mm$extra$Form
+  result$ivform <- mm$extra$ivform
+  result$inames <- mm$extra$inames
+  result$na.action <- mm$extra$naact
+  result$weights <- mm$weights
   result
 }
 
 
 newols <- function(mm, stage1=NULL, pf=parent.frame(), nostats=FALSE, exactDOF=FALSE,
-                   kappa=NULL) {
+                   kappa=NULL, onlyse=FALSE, psdef=FALSE) {
 
   if(!is.null(mm$orig))
       orig <- mm$orig
@@ -317,12 +374,13 @@ newols <- function(mm, stage1=NULL, pf=parent.frame(), nostats=FALSE, exactDOF=F
 
   numctrl <- if(is.null(mm$numctrl)) 0 else mm$numctrl
   hasicpt <- if(is.null(mm$hasicpt)) FALSE else mm$hasicpt
+  cfactor <- compfactor(mm$fl)
   if(is.numeric(exactDOF)) {
     df <- exactDOF
     totvar <- nrow(mm$y) - df
   } else {
     # numrefs is also used later
-    numrefs <- nrefs(mm$fl, compfactor(mm$fl), exactDOF) 
+    numrefs <- nrefs(mm$fl, cfactor, exactDOF) 
     totvar <- totalpvar(mm$fl)-numrefs + numctrl
     df <- nrow(mm$y)-totvar
   }
@@ -331,15 +389,24 @@ newols <- function(mm, stage1=NULL, pf=parent.frame(), nostats=FALSE, exactDOF=F
 
   if(is.null(mm$x) || ncol(mm$x) == 0) {
     
-    z <- list(N=nrow(mm$x), r.residuals=orig$y,fe=mm$fl,p=totvar,Pp=0,cfactor=compfactor(mm$fl),
+    z <- list(N=nrow(mm$x), 
+              p=totvar,Pp=0,
               na.action=mm$na.action, contrasts=mm$contrasts,
-              fitted.values=orig$y - mm$y,
               df=df,
               nostats=FALSE,
               numctrl=numctrl,
               hasicpt=hasicpt,
-              residuals=mm$y,clustervar=mm$cluster, call=match.call())
-    z$df.residual <- z$df
+              lhs=colnames(mm$y),
+              call=match.call())
+    if(!onlyse) {
+      z$r.residuals <- orig$y
+      z$fe <- mm$fl
+      z$cfactor <- cfactor
+      z$fitted.values <- orig$y - mm$y
+      z$df.residual <- z$df
+      z$residuals=mm$y
+      z$clustervar=mm$cluster
+    }
     class(z) <- 'felm'
     return(z)
   }
@@ -409,13 +476,14 @@ newols <- function(mm, stage1=NULL, pf=parent.frame(), nostats=FALSE, exactDOF=F
   z$hasicpt <- hasicpt
   z$TSS <- mm$TSS
   z$kappa <- kappa
+
   if(is.null(weights)) 
       z$P.TSS <- apply(mm$y,2,var)*(nrow(mm$y)-1)
   else
       z$P.TSS <- apply(mm$y, 2, function(yy) sum( weights^2*(yy-sum(weights^2*yy/sum(weights^2)))^2))
 
   names(z$P.TSS) <- colnames(mm$y)
-  z$weights <- weights
+  if(!onlyse) z$weights <- weights
 
   z$numctrl <- numctrl
   z$coefficients <- z$beta <- beta
@@ -428,26 +496,24 @@ newols <- function(mm, stage1=NULL, pf=parent.frame(), nostats=FALSE, exactDOF=F
   zfit <- mm$x %*% nabeta
   zresid <- mm$y - zfit
   
-  z$response <- orig$y
-  z$fitted.values <- zfit 
   z$residuals <- zresid
 
-#  if(!is.null(weights) && length(mm$fl) != 0) {
-#    .Call(C_scalecols, z$residuals, iweights)
-#    .Call(C_scalecols, z$fitted.values, iweights)
-#  }
-#  if(!is.null(weights) && length(mm$fl) == 0) {
-#    .Call(C_scalecols,z$residuals,weights)
-#    .Call(C_scalecols,z$fitted.values,weights)
-#  }
+  if(!onlyse) {
+    z$response <- orig$y
+    z$fitted.values <- zfit 
+    z$cfactor <- compfactor(mm$fl)
+    z$fe <- mm$fl
+  }
 
   z$contrasts <- mm$contrasts
-  if(length(mm$fl) != 0) {
+  if(!onlyse) {
+    if(length(mm$fl) != 0) {
 #    message('dims:');print(dim(orig$y)); print(dim(orig$x)); print(dim(nabeta))
-    if(is.null(kappa)) z$r.residuals <- orig$y - orig$x %*% nabeta
+      if(is.null(kappa)) z$r.residuals <- orig$y - orig$x %*% nabeta
 #    if(!is.null(weights)) .Call(C_scalecols,z$r.residuals,weights)
-  } else {
-    z$r.residuals <- z$residuals
+    } else {
+      z$r.residuals <- z$residuals
+    }
   }
 
   # For IV, the residuals should be the residuals from the original
@@ -459,19 +525,21 @@ newols <- function(mm, stage1=NULL, pf=parent.frame(), nostats=FALSE, exactDOF=F
 
   if(!is.null(stage1)) {
     # we need the centred response in condfstat()
-    z$c.response <- mm$y
     fitnam <- makefitnames(stage1$lhs)
     ivresid <- stage1$residuals %*% nabeta[fitnam,,drop=FALSE]
-    z$iv.residuals <- z$residuals
+    
     z$residuals <- z$residuals - ivresid    
-    z$r.iv.residuals <- z$r.residuals
-    z$r.residuals <- z$r.residuals - ivresid
-    z$endovars <- stage1$lhs
-    z$fitted.values <- z$response - z$residuals
+    if(!onlyse) {
+      z$c.response <- mm$y
+      z$iv.residuals <- zresid
+      z$r.iv.residuals <- z$r.residuals
+      z$r.residuals <- z$r.residuals - ivresid
+      z$endovars <- stage1$lhs
+      z$fitted.values <- z$response - z$residuals
+    }
   }
-
+  
   z$terms <- mm$terms
-  z$cfactor <- compfactor(mm$fl)
   totlev <- totalpvar(mm$fl)
 
   if(is.numeric(exactDOF)) {
@@ -487,7 +555,6 @@ newols <- function(mm, stage1=NULL, pf=parent.frame(), nostats=FALSE, exactDOF=F
   z$rank <- z$N - z$df
   z$exactDOF <- exactDOF
 
-  z$fe <- mm$fl
 # should we subtract 1 for an intercept?
 # a similar adjustment is done in summary.felm when computing rdf
   z$p <- z$p + numdum #- 1  
@@ -495,7 +562,7 @@ newols <- function(mm, stage1=NULL, pf=parent.frame(), nostats=FALSE, exactDOF=F
   z$na.action <- mm$na.action
   class(z) <- 'felm'
   cluster <- mm$cluster
-  z$clustervar <- cluster
+  if(!onlyse) z$clustervar <- cluster
   z$stage1 <- stage1
   if(nostats) {
     z$nostats <- TRUE
@@ -578,7 +645,7 @@ newols <- function(mm, stage1=NULL, pf=parent.frame(), nostats=FALSE, exactDOF=F
       if(is.null(method)) method <- 'cgm'
       dfadj <- (z$N-1)/z$df
       d <- length(cluster)
-      if(method == 'cgm' || TRUE) {
+      if(method == 'cgm') {
         meat <- matrix(0,Ncoef,Ncoef)
         for(i in 1:(2^d-1)) {
           # Find out which ones to interact
@@ -588,35 +655,39 @@ newols <- function(mm, stage1=NULL, pf=parent.frame(), nostats=FALSE, exactDOF=F
           # interact the factors
           ia <- factor(do.call(paste,c(cluster[iac],sep='\004')))
           adj <- sgn*dfadj*nlevels(ia)/(nlevels(ia)-1)
-          .Call(C_dsyrk,1.0,meat,adj,rowsum(xz,ia))
+          .Call(C_dsyrk,1.0,meat,adj,Crowsum(xz,ia))
         }
 
         cvcv <- .Call(C_sandwich,1.0,inv,meat)
-
+        if(psdef) {
+          ev <- eigen(cvcv)
+          if(any(ev$values < 0)) {
+            warning('Negative eigenvalues set to zero in multiway clustered variance matrix. See felm(...,psdef=FALSE)')
+            cvcv <- ev$vectors %*% diag(pmax(ev$values,0)) %*% t(ev$vectors)
+          }
+          rm(ev)
+        }
         setdimnames(cvcv, vcvnames)
         z$STATS[[lhs]]$clustervcv <- cvcv
         if(singlelhs) z$clustervcv <- cvcv
         rm(meat,cvcv)
 
-        ## } else if(method == 'gaure') {
-        ##   .Call(C_scalecols, xz, 1/rscale)
-        ##   meat <- matrix(0,nrow(z$vcv),ncol(z$vcv))
-        ##   dm.res <- demeanlist(res,cluster)
-        ##   skel <- lapply(cluster, function(f) rep(0,nlevels(f)))
-        ##   means <- relist(kaczmarz(cluster,res-dm.res), skel)
-        ##   scale <- ifelse(dm.res==0,1e-40, dm.res)
-        ##   .Call(C_scalecols, xz, scale)
-        ##   .Call(C_dsyrk, 1, meat, dfadj, xz)
-        ##   .Call(C_scalecols, xz, 1/scale)
-        ##   for(i in seq_along(cluster)) {
-        ##     rs <- rowsum(xz, cluster[[i]])
-        ##     adj <- nlevels(cluster[[i]])/(nlevels(cluster[[i]])-1)
-        ##     .Call(C_scalecols, rs, means[[i]])
-        ##     .Call(C_dsyrk, 1, meat, dfadj*adj, rs)
-        ##   }
-        ##   rm(xz,rs)
-        ##   z$clustervcv <- inv %*% meat %*% inv
-        ##   rm(meat)
+      } else if(method == 'gaure') {
+ #       .Call(C_scalecols, xz, 1/rscale)
+        meat <- matrix(0,nrow(z$vcv),ncol(z$vcv))
+        # scale the columns according to group size
+        sc <- apply(sapply(cluster, function(f) table(f)[f]),1,mean)
+        xc <- demeanlist(xz,cluster, means=TRUE)
+       .Call(C_scalecols, xc, sqrt(sc))
+        adj <- 1
+        adj <- adj*prod(sapply(cluster, function(f) nlevels(f)/(nlevels(f)-1)))
+        .Call(C_dsyrk, 1, meat, dfadj*adj, xc)
+        cvcv <- .Call(C_sandwich,1.0,inv,meat)
+        setdimnames(cvcv, vcvnames)
+        z$STATS[[lhs]]$clustervcv <- cvcv
+        if(singlelhs) z$clustervcv <- cvcv
+        rm(meat,cvcv)
+        .Call(C_scalecols, xz, rscale)
       } else {
         stop('unknown multi way cluster algorithm:',method)
       }
@@ -654,16 +725,310 @@ newols <- function(mm, stage1=NULL, pf=parent.frame(), nostats=FALSE, exactDOF=F
     # reset this for next lhs
     .Call(C_scalecols, xz, 1/rscale)
   }
+  if(onlyse) z$residuals <- NULL
   z
 }
 
+
+
+
+
+
+
+#' Fit a linear model with multiple group fixed effects
+#' 
+#' 'felm' is used to fit linear models with multiple group fixed effects,
+#' similarly to lm.  It uses the Method of Alternating projections to sweep out
+#' multiple group effects from the normal equations before estimating the
+#' remaining coefficients with OLS.
+#' 
+#' This function is intended for use with large datasets with multiple group
+#' effects of large cardinality.  If dummy-encoding the group effects results
+#' in a manageable number of coefficients, you are probably better off by using
+#' \code{\link{lm}}.
+#' 
+#' The formula specification is a response variable followed by a four part
+#' formula. The first part consists of ordinary covariates, the second part
+#' consists of factors to be projected out. The third part is an
+#' IV-specification. The fourth part is a cluster specification for the
+#' standard errors.  I.e. something like \code{y ~ x1 + x2 | f1 + f2 | (Q|W ~
+#' x3+x4) | clu1 + clu2} where \code{y} is the response, \code{x1,x2} are
+#' ordinary covariates, \code{f1,f2} are factors to be projected out, \code{Q}
+#' and \code{W} are covariates which are instrumented by \code{x3} and
+#' \code{x4}, and \code{clu1,clu2} are factors to be used for computing cluster
+#' robust standard errors. Parts that are not used should be specified as
+#' \code{0}, except if it's at the end of the formula, where they can be
+#' omitted.  The parentheses are needed in the third part since \code{|} has
+#' higher precedence than \code{~}. Multiple left hand sides like \code{y|w|x ~
+#' x1 + x2 |f1+f2|...} are allowed.
+#' 
+#' Interactions between a covariate \code{x} and a factor \code{f} can be
+#' projected out with the syntax \code{x:f}.  The terms in the second and
+#' fourth parts are not treated as ordinary formulas, in particular it is not
+#' possible with things like \code{y ~ x1 | x*f}, rather one would specify
+#' \code{y ~ x1 + x | x:f + f}. Note that \code{f:x} also works, since R's
+#' parser does not keep the order.  This means that in interactions, the factor
+#' \emph{must} be a factor, whereas a non-interacted factor will be coerced to
+#' a factor. I.e. in \code{y ~ x1 | x:f1 + f2}, the \code{f1} must be a factor,
+#' whereas it will work as expected if \code{f2} is an integer vector.
+#' 
+#' In older versions of \pkg{lfe} the syntax was \code{felm(y ~ x1 + x2 + G(f1)
+#' + G(f2), iv=list(Q ~ x3+x4, W ~ x3+x4), clustervar=c('clu1','clu2'))}. This
+#' syntax still works, but yields a warning. Users are \emph{strongly}
+#' encouraged to change to the new multipart formula syntax.  The old syntax
+#' will be removed at a later time.
+#' 
+#' The standard errors are adjusted for the reduced degrees of freedom coming
+#' from the dummies which are implicitly present.  In the case of two factors,
+#' the exact number of implicit dummies is easy to compute.  If there are more
+#' factors, the number of dummies is estimated by assuming there's one
+#' reference-level for each factor, this may be a slight over-estimation,
+#' leading to slightly too large standard errors. Setting \code{exactDOF='rM'}
+#' computes the exact degrees of freedom with \code{rankMatrix()} in package
+#' \pkg{Matrix}.
+#' 
+#' For the iv-part of the formula, it is only necessary to include the
+#' instruments on the right hand side.  The other explanatory covariates, from
+#' the first and second part of \code{formula}, are added automatically in the
+#' first stage regression.  See the examples.
+#' 
+#' The \code{contrasts} argument is similar to the one in \code{lm()}, it is
+#' used for factors in the first part of the formula. The factors in the second
+#' part are analyzed as part of a possible subsequent \code{getfe()} call.
+#' 
+#' The old syntax with a single part formula with the \code{G()} syntax for the
+#' factors to transform away is still supported, as well as the
+#' \code{clustervar} and \code{iv} arguments, but users are encouraged to move
+#' to the new multi part formulas as described here.  The \code{clustervar} and
+#' \code{iv} arguments have been moved to the \code{...} argument list. They
+#' will be removed in some future update.
+#' 
+#' @param formula an object of class '"formula"' (or one that can be coerced to
+#' that class): a symbolic description of the model to be fitted. Similarly to
+#' 'lm'.  See Details.
+#' @param data a data frame containing the variables of the model.
+#' @param exactDOF logical. If more than two factors, the degrees of freedom
+#' used to scale the covariance matrix (and the standard errors) is normally
+#' estimated. Setting \code{exactDOF=TRUE} causes \code{felm} to attempt to
+#' compute it, but this may fail if there are too many levels in the factors.
+#' \code{exactDOF='rM'} will use the exact method in
+#' \code{Matrix::rankMatrix()}, but this is slower. If neither of these methods
+#' works, it is possible to specify \code{exactDOF='mc'}, which utilizes a
+#' Monte-Carlo method to estimate the expectation E(x' P x) = tr(P), the trace
+#' of a certain projection, a method which may be more accurate than the
+#' default guess.
+#' 
+#' If the degrees of freedom for some reason are known, they can be specified
+#' like \code{exactDOF=342772}.
+#' @param subset an optional vector specifying a subset of observations to be
+#' used in the fitting process.
+#' @param na.action a function which indicates what should happen when the data
+#' contain \code{NA}s.  The default is set by the \code{na.action} setting of
+#' \code{options}, and is \code{na.fail} if that is unset.  The 'factory-fresh'
+#' default is \code{na.omit}.  Another possible value is \code{NULL}, no
+#' action. \code{na.exclude} is currently not supported.
+#' @param contrasts an optional list. See the \code{contrasts.arg} of
+#' \code{model.matrix.default}.
+#' @param weights an optional vector of weights to be used in the fitting
+#' process.  Should be 'NULL' or a numeric vector.  If non-NULL, weighted least
+#' squares is used with weights \code{weights} (that is, minimizing
+#' \code{sum(w*e^2)}); otherwise ordinary least squares is used.
+#' @param ... other arguments.  \itemize{
+#' 
+#' \item \code{keepX} logical. To include a copy of the expanded data matrix in
+#' the return value, as needed by \code{\link{bccorr}} and \code{\link{fevcov}}
+#' for proper limited mobility bias correction.
+#' 
+#' \item \code{keepCX} logical. Keep a copy of the centred expanded data matrix
+#' in the return value. As list elements \code{cX} for the explanatory
+#' variables, and \code{cY} for the outcome.
+#' 
+#' \item \code{nostats} logical. Don't include covariance matrices in the
+#' output, just the estimated coefficients and various descriptive information.
+#' For IV, \code{nostats} can be a logical vector of length 2, with the last
+#' value being used for the 1st stages.  \item \code{psdef} logical. In case of
+#' multiway clustering, the method of Cameron, Gelbach and Miller may yield a
+#' non-definite variance matrix. Ordinarily this is forced to be semidefinite
+#' by setting negative eigenvalues to zero. Setting \code{psdef=FALSE} will
+#' switch off this adjustment.  Since the variance estimator is asymptotically
+#' correct, this should only have an effect when the clustering factors have
+#' very few levels.
+#' 
+#' \item \code{kclass} character. For use with instrumental variables. Use a
+#' k-class estimator rather than 2SLS/IV. Currently, the values \code{'nagar',
+#' 'b2sls', 'mb2sls', 'liml'} are accepted, where the names are from
+#' \cite{Kolesar et al (2014)}, as well as a numeric value for the 'k' in
+#' k-class. With \code{kclass='liml'}, \code{felm} also accepts the argument
+#' \code{fuller=<numeric>}, for using a Fuller adjustment of the
+#' liml-estimator.
+#' 
+#' \item \code{Nboot, bootexpr, bootcluster} Since \code{felm} has quite a bit
+#' of overhead in the creation of the model matrix, if one wants confidence
+#' intervals for some function of the estimated parameters, it is possible to
+#' bootstrap internally in \code{felm}.  That is, the model matrix is resampled
+#' \code{Nboot} times and estimated, and the \code{bootexpr} is evaluated
+#' inside an \code{sapply}. The estimated coefficients and the left hand
+#' side(s) are available by name. Any right hand side variable \code{x} is
+#' available by the name \code{var.x}.  The \code{"felm"}-object for each
+#' estimation is available as \code{est}. If a \code{bootcluster} is specified
+#' as a factor, entire levels are resampled. \code{bootcluster} can also be a
+#' function with no arguments, it should return a vector of integers, the rows
+#' to use in the sample. It can also be the string 'model', in which case the
+#' cluster is taken from the model. \code{bootexpr} should be an expression,
+#' e.g. like \code{quote(x/x2 * abs(x3)/mean(y))}.  It could be wise to specify
+#' \code{nostats=TRUE} when bootstrapping, unless the covariance matrices are
+#' needed in the bootstrap. If you need the covariance matrices in the full
+#' estimate, but not in the bootstrap, you can specify it in an attribute
+#' \code{"boot"} as \code{nostats=structure(FALSE, boot=TRUE)}.
+#' 
+#' \item \code{iv, clustervar} deprecated.  These arguments will be removed at
+#' a later time, but are still supported in this field. Users are
+#' \emph{STRONGLY} encouraged to use multipart formulas instead.  In
+#' particular, not all functionality is supported with the deprecated syntax;
+#' iv-estimations actually run a lot faster if multipart formulas are used, due
+#' to new algorithms which I didn't bother to shoehorn in place for the
+#' deprecated syntax.
+#' 
+#' }
+#' @return \code{felm} returns an object of \code{class} \code{"felm"}.  It is
+#' quite similar to an \code{"lm"} object, but not entirely compatible.
+#' 
+#' The generic \code{summary}-method will yield a summary which may be
+#' \code{print}'ed.  The object has some resemblance to an \code{'lm'} object,
+#' and some postprocessing methods designed for \code{lm} may happen to work.
+#' It may however be necessary to coerce the object to succeed with this.
+#' 
+#' The \code{"felm"} object is a list containing the following fields:
+#' 
+#' \item{coefficients}{a numerical vector. The estimated coefficients.}
+#' \item{N}{an integer. The number of observations} \item{p}{an integer. The
+#' total number of coefficients, including those projected out.}
+#' \item{response}{a numerical vector. The response vector.}
+#' \item{fitted.values}{a numerical vector. The fitted values.}
+#' 
+#' \item{residuals}{a numerical vector. The residuals of the full system, with
+#' dummies.  For IV-estimations, this is the residuals when the original
+#' endogenous variables are used, not their predictions from the 1st stage.}
+#' 
+#' \item{r.residuals}{a numerical vector. Reduced residuals, i.e. the residuals
+#' resulting from predicting \emph{without} the dummies.}
+#' 
+#' \item{iv.residuals}{numerical vector. When using instrumental variables,
+#' residuals from 2. stage, i.e. when predicting with the predicted endogenous
+#' variables from the 1st stage.}
+#' 
+#' \item{weights}{numeric. The square root of the argument \code{weights}.}
+#' 
+#' \item{cfactor}{factor of length N. The factor describing the connected
+#' components of the two first terms in the second part of the model formula.}
+#' 
+#' \item{vcv}{a matrix. The variance-covariance matrix.}
+#' 
+#' \item{fe}{list of factors. A list of the terms in the second part of the
+#' model formula.}
+#' 
+#' \item{stage1}{The '\code{felm}' objects for the IV 1st stage, if used. The
+#' 1st stage has multiple left hand sides if there are more than one
+#' instrumented variable.}
+#' 
+#' \item{iv1fstat}{list of numerical vectors. For IV 1st stage, F-value for
+#' excluded instruments, the number of parameters in restricted model and in
+#' the unrestricted model.}
+#' 
+#' \item{X}{matrix. The expanded data matrix, i.e. from the first part of the
+#' formula. To save memory with large datasets, it is only included if
+#' \code{felm(keepX=TRUE)} is specified.  Must be included if
+#' \code{\link{bccorr}} or \code{\link{fevcov}} is to be used for correcting
+#' limited mobility bias.  }
+#' 
+#' \item{cX, cY}{matrix. The centred expanded data matrix. Only included if
+#' \code{felm(keepCX=TRUE)}.  }
+#' 
+#' \item{boot}{The result of a \code{replicate} applied to the \code{bootexpr}
+#' (if used).}
+#' 
+#' @note
+#' Side effect: If \code{data} is an object of class \code{"pdata.frame"} (from
+#' the \pkg{plm} package), the \pkg{plm} namespace is loaded if available, and
+#' \code{data} is coerced to a \code{"data.frame"} with \code{as.data.frame}
+#' which dispatches to a \pkg{plm} method.  This ensures that transformations
+#' like \code{diff} and \code{lag} from \pkg{plm} works as expected, but it
+#' also incurs an additional copy of the \code{data}, and the \pkg{plm}
+#' namespace remains loaded after \code{felm} returns.  When working with
+#' \code{"pdata.frame"}s, this is what is usually wanted anyway.
+#' 
+#' For technical reasons, when running IV-estimations, the data frame supplied
+#' in the \code{data} argument to \code{felm}, should \emph{not} contain
+#' variables with names ending in \code{'(fit)'}.  Variables with such names
+#' are used internally by \code{felm}, and may then accidentally be looked up
+#' in the data frame instead of the local environment where they are defined.
+#' @seealso \code{\link{getfe}} \code{\link{summary.felm}}
+#' \code{\link{condfstat}} \code{\link{waldtest}}
+#' @references Cameron, A.C., J.B. Gelbach and D.L. Miller (2011) \cite{Robust
+#' inference with multiway clustering}, Journal of Business & Economic
+#' Statistics 29 (2011), no. 2, 238--249.
+#' \url{http://dx.doi.org/10.1198/jbes.2010.07136}
+#' 
+#' Kolesar, M., R. Chetty, J. Friedman, E. Glaeser, and G.W. Imbens (2014)
+#' \cite{Identification and Inference with Many Invalid Instruments}, Journal
+#' of Business & Economic Statistics (to appear).
+#' \url{http://dx.doi.org/10.1080/07350015.2014.978175}
+#' @examples
+#' 
+#' oldopts <- options(lfe.threads=1)
+#' ## create covariates
+#' x <- rnorm(1000)
+#' x2 <- rnorm(length(x))
+#' 
+#' ## individual and firm
+#' id <- factor(sample(20,length(x),replace=TRUE))
+#' firm <- factor(sample(13,length(x),replace=TRUE))
+#' 
+#' ## effects for them
+#' id.eff <- rnorm(nlevels(id))
+#' firm.eff <- rnorm(nlevels(firm))
+#' 
+#' ## left hand side
+#' u <- rnorm(length(x))
+#' y <- x + 0.5*x2 + id.eff[id] + firm.eff[firm] + u
+#' 
+#' ## estimate and print result
+#' est <- felm(y ~ x+x2| id + firm)
+#' summary(est)
+#' \dontrun{
+#' ## compare with lm
+#' summary(lm(y ~ x + x2 + id + firm-1))
+#' }
+#' 
+#' # make an example with 'reverse causation'
+#' # Q and W are instrumented by x3 and the factor x4. Report robust s.e.
+#' x3 <- rnorm(length(x))
+#' x4 <- sample(12,length(x),replace=TRUE)
+#' 
+#' Q <- 0.3*x3 + x + 0.2*x2 + id.eff[id] + 0.3*log(x4) - 0.3*y + rnorm(length(x),sd=0.3)
+#' W <- 0.7*x3 - 2*x + 0.1*x2 - 0.7*id.eff[id] + 0.8*cos(x4) - 0.2*y+ rnorm(length(x),sd=0.6)
+#' 
+#' # add them to the outcome
+#' y <- y + Q + W
+#' 
+#' ivest <- felm(y ~ x + x2 | id+firm | (Q|W ~x3+factor(x4)))
+#' summary(ivest,robust=TRUE)
+#' condfstat(ivest)
+#' \dontrun{
+#' # compare with the not instrumented fit:
+#' summary(felm(y ~ x + x2 +Q + W |id+firm))
+#' }
+#' options(oldopts)
+#' 
+#' @export felm
 felm <- function(formula, data, exactDOF=FALSE, subset, na.action,
                  contrasts=NULL,weights=NULL,...) {
 
   knownargs <- c('iv', 'clustervar', 'cmethod', 'keepX', 'nostats',
-                 'wildcard', 'kclass', 'fuller', 'keepCX')
-  keepX <- FALSE
-  keepCX <- FALSE
+                 'wildcard', 'kclass', 'fuller', 'keepCX', 'Nboot',
+                 'bootexpr', 'bootcluster','onlyse','psdef')
+  keepX <- TRUE
+  keepCX <- TRUE
   cmethod <- 'cgm'
   iv <- NULL
   clustervar <- NULL
@@ -671,9 +1036,15 @@ felm <- function(formula, data, exactDOF=FALSE, subset, na.action,
   wildcard <- 'n'
   kclass <- NULL
   fuller <- 0
+  Nboot <- 0
+  onlyse <- FALSE
+  bootexpr <- NULL
+  bootcluster <- NULL
   deprec <- c('iv', 'clustervar')
-  mf <- match.call(expand.dots = TRUE)
+  psdef <- TRUE
   
+  mf <- match.call(expand.dots = TRUE)
+
   # Currently there shouldn't be any ... arguments
   # check that the list is empty
 
@@ -705,13 +1076,130 @@ felm <- function(formula, data, exactDOF=FALSE, subset, na.action,
     mf[[1L]] <- quote(..oldfelm)
     return(eval.parent(mf))
   }
-
+  pint <- getOption('lfe.pint')
+  start <- last <- Sys.time()
   mm <- makematrix(mf, contrasts, pf=parent.frame(), clustervar, wildcard=wildcard)
-  ivform <- mm$ivform
+  if(!is.null(mm$cluster)) attr(mm$cluster,'method') <- cmethod
+  now <- Sys.time()
+  if(now  > last + pint) {last <- now; message(date(), ' finished centering model matrix')}
+  z <- felm.mm(mm,nostats,exactDOF,keepX,keepCX,kclass,fuller,onlyse,psdef=psdef)
+  z$call <- match.call()
+  if(Nboot > 0) {
+    now <- Sys.time()
+    if(now > last + pint) {last <- now; message(date(), ' finished estimate, starting bootstrap')}
 
+    mm <- makematrix(mf, contrasts, pf=parent.frame(), clustervar, wildcard=wildcard,
+                     onlymm=TRUE)
+    if(is.null(bootexpr)) bootexpr <- quote(beta)
+    if(is.null(bootcluster))
+        csample <- function() sort(sample(nrow(mm$x), replace=TRUE))
+    else if(is.function(bootcluster))
+        csample <- bootcluster
+    else if(is.factor(bootcluster))
+        csample <- function() resample(bootcluster,na.action=mm$extra$naact)
+    else if(identical(bootcluster, 'model')) 
+        csample <- function() resample(mm$extra$cluster)
+    else
+        stop('bootcluster must be either a factor or a function')
+    bootstat <- nostats
+    if(!is.null(attr(nostats,'boot'))) bootstat <- attr(nostats,'boot')
+    iii <- 0
+    bootfun <- function() {
+      now <<- Sys.time()
+      iii <<- iii+1
+      if(now > last + pint) {
+        last <<- now; message(date(), ' done boot iter ',iii)
+      }
+      bootenv <- new.env()
+      # we delay assign to avoid unnecessary estimating and copying
+      if(FALSE) {olsmms <- mms <- est <- bootx <- booty <- bootivy <- NULL} #avoid warning about no visible binding
+      delayedAssign('s',csample(),eval.env=bootenv,assign.env=bootenv)
+      delayedAssign('bootx',mm$x[s,,drop=FALSE],eval.env=bootenv,assign.env=bootenv)
+      delayedAssign('booty',mm$y[s,,drop=FALSE],eval.env=bootenv,assign.env=bootenv)
+      delayedAssign('bootivy',mm$ivy[s,,drop=FALSE],eval.env=bootenv,assign.env=bootenv)
+      
+      delayedAssign('mms',
+                    {
+                      mm1 <- list()
+                      mm1$extra <- mm$extra
+                      mm1$extra$cluster <- lapply(mm$extra$cluster,function(f) f[s])
+                      mm1$extra$naact <- NULL
+                      mm1$x <- bootx
+                      mm1$y <- booty
+                      if(!is.null(mm$ivx)) mm1$ivx <- mm$ivx[s,,drop=FALSE]
+                      if(!is.null(mm$ivy)) mm1$ivy <- bootivy 
+                      if(!is.null(mm$ctrl)) mm1$ctrl <- mm$ctrl[s,,drop=FALSE]
+                      if(!is.null(mm$fl)) mm1$fl <- lapply(mm$fl,function(f) factor(f[s]))
+                      if(!is.null(weights)) mm1$weights <- mm$weights[s]
+                      mmdemean(mm1)
+                    },
+                    eval.env=bootenv,
+                    assign.env=bootenv)
+      delayedAssign('est',
+                    felm.mm(mms,bootstat,exactDOF,keepX,keepCX,kclass,fuller,onlyse,psdef=psdef),
+                    eval.env=bootenv,
+                    assign.env=bootenv)
+      delayedAssign('beta', coef(est), assign.env=bootenv, eval.env=bootenv)
+      for(n in colnames(mm$x)) {
+        do.call(delayedAssign,list(n,bquote(est$coefficients[.(n),]),
+                                   eval.env=bootenv,
+                                   assign.env=bootenv))
+        do.call(delayedAssign,list(paste0('var.',n),bquote(bootx[,.(n)]),
+                                   eval.env=bootenv,
+                                   assign.env=bootenv))
+
+      }
+
+      for(n in colnames(mm$y)) {
+        do.call(delayedAssign,list(n,bquote(booty[,.(n)]),
+                                   eval.env=bootenv,
+                                   assign.env=bootenv))
+      }
+
+      if(!is.null(mm$ivy)) {
+        # it's an IV-estimation, make provisions for using the OLS-version
+        delayedAssign('olsmms',
+                      {
+                        if(FALSE) s <- NULL  # avoid warnings about undefined s
+                        # make the s by evaluating mms
+#                        mms
+                        mm1 <- list()
+                        mm1$extra <- mm$extra
+                        mm1$extra$ivform <- NULL
+                        mm1$x <- cbind(mm$x[s,,drop=FALSE],mm$ivy[s,,drop=FALSE])
+                        mm1$y <- mm$y[s,,drop=FALSE]
+                        if(!is.null(mm$ctrl)) mm1$ctrl <- mm$ctrl[s,,drop=FALSE]
+                        if(!is.null(mm$fl)) mm1$fl <- lapply(mm$fl,function(f) factor(f[s]))
+                        if(!is.null(weights)) mm1$weights <- mm$weights[s]
+                         mmdemean(mm1)
+                      },
+                      eval.env=bootenv,
+                      assign.env=bootenv)
+        
+        delayedAssign('ols',
+                      felm.mm(olsmms,bootstat,exactDOF,keepX,keepCX,onlyse=onlyse,psdef=psdef),
+                      eval.env=bootenv,
+                      assign.env=bootenv)
+        
+        for(n in colnames(mm$ivy)) {
+          do.call(delayedAssign, list(n,bquote(bootivy[,.(n)]),
+                                               eval.env=bootenv,
+                                               assign.env=bootenv))
+        }
+
+      }
+      eval(bootexpr, bootenv)
+    }
+    z$boot <- replicate(Nboot, bootfun())
+  } 
+  z
+}
+
+felm.mm <- function(mm,nostats,exactDOF,keepX,keepCX,kclass=NULL,fuller=NULL,onlyse=FALSE,psdef=FALSE) {
+  ivform <- mm$ivform
   if(is.null(ivform)) {
     # no iv, just do the thing
-    z <- newols(mm, nostats=nostats[1], exactDOF=exactDOF)
+    z <- newols(mm, nostats=nostats[1], exactDOF=exactDOF, onlyse=onlyse,psdef=psdef)
     if(keepX) z$X <- if(is.null(mm$orig)) mm$x else mm$orig$x
     if(keepCX) {z$cX <- mm$x; z$cY <- mm$y}
     z$call <- match.call()
@@ -769,12 +1257,12 @@ felm <- function(formula, data, exactDOF=FALSE, subset, na.action,
     mm2$orig$x <- cbind(mm$orig$x, mm$orig$ivx)
     mm2$orig$y <- cbind(mm$orig$y, mm$orig$ivy)
     rm(mm)
-    z1 <- newols(mm1, nostats=nost1)
+    z1 <- newols(mm1, nostats=nost1, onlyse=onlyse,psdef=psdef)
 
     mm2$noinst <- z1$residuals
     rm(mm1)
 #    setdimnames(mm2$x, list(NULL, c(fitnames,nmx)))
-    z2 <- newols(mm2, exactDOF=exactDOF, kappa=kappa, nostats=nostats[1])
+    z2 <- newols(mm2, exactDOF=exactDOF, kappa=kappa, nostats=nostats[1], onlyse=onlyse, psdef=psdef)
     if(keepX) z2$X <- if(is.null(mm2$orig)) mm2$x else mm2$orig$x
     if(keepCX) {z2$cX <- mm2$x; z2$cY <- mm2$y}
     z2$call <- match.call()
@@ -801,7 +1289,7 @@ felm <- function(formula, data, exactDOF=FALSE, subset, na.action,
   mm1$orig$y <- mm$orig$ivy
   mm1$orig$x <- cbind(mm$orig$x, mm$orig$ivx)
 
-  z1 <- newols(mm1, nostats=nost1, exactDOF=exactDOF)
+  z1 <- newols(mm1, nostats=nost1, exactDOF=exactDOF, onlyse=onlyse, psdef=psdef)
   if(keepX) z1$X <- if(is.null(mm1$orig)) mm1$x else mm1$orig$x
   if(keepCX) {z1$cX <- mm1$x; z1$cY <- mm1$y}
   rm(mm1)
@@ -837,7 +1325,7 @@ felm <- function(formula, data, exactDOF=FALSE, subset, na.action,
   rm(mm)  # save some memory
 
 
-  z2 <- newols(mm2, stage1=z1, nostats=nostats[1], exactDOF=exactDOF, kappa=kappa)
+  z2 <- newols(mm2, stage1=z1, nostats=nostats[1], exactDOF=exactDOF, kappa=kappa, onlyse=onlyse, psdef=psdef)
   if(keepX) z2$X <- if(is.null(mm2$orig)) mm2$x else mm2$orig$x
   if(keepCX) {z2$cX <- mm2$x; z2$cY <- mm2$y}
   rm(mm2)

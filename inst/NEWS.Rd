@@ -1,7 +1,46 @@
 \name{NEWS}
 \title{lfe news}
+\section{Changes in version 2.5}{
+  \itemize{
+  \item \code{demeanlist()} will now do the transformation in place if
+  given an unnamed input. This saves memory in various other places.
 
-\section{Changes in version 2.3}{
+  \item Multiway clustered standard errors now incorporate the negative
+  Eigenvalue adjustment of Cameron, Gelbach, Miller. I.e. they are
+  forced to zero. Can be switched off by \code{felm(...,psdef=FALSE)}.
+
+  \item Fixed a bug in \code{btrap} which could yield wrong bootstrapped standard
+  errors in \code{getfe}.
+
+  \item A function \code{nlexpect()} has been added to integrate
+  functions of estimated coefficients over the residual distribution.
+
+  \item \code{waldtest()} now supports non-linear restrictions with the Delta-method.
+  }
+}
+
+\section{Changes in version 2.4 (2015-10-26}{
+\itemize{
+  \item A bug in bias correction with clustered errors has been fixed.
+
+  \item A bug in the handling of expressions f:g with two factors has
+  been fixed.
+
+  \item A function \code{estfun.felm} has been introduced to improve
+  interoperability with the package \pkg{multiwayvcov}.  Also a function
+  \code{weights.felm} has been introduced.
+
+  \item A bug in \code{residuals.felm} has been fixed.
+
+  \item \code{felm} now supports bootstrapping an arbitrary expression
+  involving estimated coefficients. This can also be done by repeated
+  calls to \code{felm}, but the builtin functionality avoids repeated
+  calls to \code{model.frame} and \code{model.matrix} which can be quite
+  time-consuming for large datasets.
+}
+}
+
+\section{Changes in version 2.3 (2015-05-25)}{
   \itemize{
 
     \item \code{felm} now has some support for \code{"pdata.frame"}s from package plm.
@@ -10,6 +49,9 @@
 
     \item A bug preventing the use of k-class estimators has been fixed.
 
+    \item A bug leading to wrong robust standard errors when using
+    weights has been fixed.
+    
   }
 }
 \section{Changes in version 2.2 (2015-04-13)}{

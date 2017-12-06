@@ -1,10 +1,67 @@
-# $Id: kaczmarz.R 1693 2015-04-07 09:36:29Z sgaure $
+#' Solve a linear system defined by factors
+#' 
+#' Uses the Kaczmarz method to solve a system of the type Dx = R, where D is
+#' the matrix of dummies created from a list of factors.
+#' 
+#' 
+#' @param fl A list of arbitrary factors of the same length
+#' @param R numeric.  A vector, matrix or list of such of the same length as
+#' the factors
+#' @param eps a tolerance for the method
+#' @param init numeric. A vector to use as initial value for the Kaczmarz
+#' iterations. The algorithm converges to the solution closest to this
+#' @param threads integer. The number of threads to use when \code{R} is more
+#' than one vector
+#' @return A vector \code{x} of length equal to the sum of the number of levels
+#' of the factors in \code{fl}, which solves the system \eqn{Dx=R}. If the
+#' system is inconsistent, the algorithm may not converge, it will give a
+#' warning and return something which may or may not be close to a solution. By
+#' setting \code{eps=0}, maximum accuracy (with convergence warning) will be
+#' achieved.
+#' @note This function is used by \code{\link{getfe}}, it's quite specialized,
+#' but it might be useful for other purposes too.
+#' 
+#' In case of convergence problems, setting \code{options(lfe.usecg=TRUE)} will
+#' cause the kaczmarz() function to dispatch to the more general conjugate
+#' gradient method of \code{\link{cgsolve}}.  This may or may not be faster.
+#' @seealso \code{\link{cgsolve}}
+#' @examples
+#' 
+#' ## create factors
+#'   f1 <- factor(sample(24000,100000,replace=TRUE))
+#'   f2 <- factor(sample(20000,length(f1),replace=TRUE))
+#'   f3 <- factor(sample(10000,length(f1),replace=TRUE))
+#'   f4 <- factor(sample(8000,length(f1),replace=TRUE))
+#' ## the matrix of dummies
+#'   D <- makeDmatrix(list(f1,f2,f3,f4))
+#'   dim(D)
+#' ## an x
+#'   truex <- runif(ncol(D))
+#' ## and the right hand side
+#'   R <- as.vector(D %*% truex)
+#' ## solve it
+#'   sol <- kaczmarz(list(f1,f2,f3,f4),R)
+#' ## verify that the solution solves the system Dx = R
+#'   sqrt(sum((D %*% sol - R)^2))
+#' ## but the solution is not equal to the true x, because the system is
+#' ## underdetermined
+#'   sqrt(sum((sol - truex)^2))
+#' ## moreover, the solution from kaczmarz has smaller norm
+#'   sqrt(sum(sol^2)) < sqrt(sum(truex^2))
+#' 
+#' @export kaczmarz
 kaczmarz <- function(fl,R,eps=getOption('lfe.eps'),init=NULL,
                      threads=getOption('lfe.threads')) {
+
   if(getOption('lfe.usecg')) {
-    if(is.list(R)) stop("cgsolve can't handle list R")
     mat <- makeDmatrix(fl)
-    return(cgsolve(crossprod(mat), crossprod(mat,R), eps=eps, init=init))
+    if(is.list(R)) {
+      mm <- crossprod(mat)
+      return(lapply(R, function(ll) drop(cgsolve(mm, crossprod(mat, ll), eps=max(eps,1e-6), init=init))))
+#      skel <- lapply(R,function(a) {if(is.matrix(a)) matrix(0,ncol(mat),ncol(a)) else rep(0,ncol(mat))})
+#      return(utils::relist(cgsolve(crossprod(mat), crossprod(mat,Reduce(cbind,R)), eps=eps, init=init), skel))
+    }
+    return(drop(cgsolve(crossprod(mat), crossprod(mat,R), eps=eps, init=init)))
   }
   if(is.null(threads)) threads <- 1
   islist <- is.list(R)
@@ -19,14 +76,12 @@ kaczmarz <- function(fl,R,eps=getOption('lfe.eps'),init=NULL,
 
 getfe.kaczmarz <- function(obj,se=FALSE,eps=getOption('lfe.eps'),ef='ref',bN=100,
                            robust=FALSE, cluster=NULL, lhs=NULL) {
-
   if(is.character(ef)) {
     ef <- efactory(obj,opt=ef)
   }
   if(!isTRUE(attr(ef,'verified')) && !is.estimable(ef, obj$fe)) {
     warning('Supplied function seems non-estimable')
   }
-
   multlhs <- length(obj$lhs) > 1
   if(is.null(lhs)) {
     R <- obj$r.residuals-obj$residuals
@@ -46,6 +101,7 @@ getfe.kaczmarz <- function(obj,se=FALSE,eps=getOption('lfe.eps'),ef='ref',bN=100
     extra <- attr(v,'extra')
     nm <- names(v)
   }
+
   res <- data.frame(effect=v)
   if(multlhs) colnames(res) <- paste('effect',colnames(R),sep='.')
   if(!is.null(extra)) res <- cbind(res,extra)
@@ -81,7 +137,7 @@ getfe.kaczmarz <- function(obj,se=FALSE,eps=getOption('lfe.eps'),ef='ref',bN=100
 # return level names in appropriate order
 # the G(x:f) with x a matrix makes it slightly complicated
 xlevels <- function(n,f,sep='.') {
-  x <- attr(f,'x')
+  x <- attr(f,'x',exact=TRUE)
   plev <- paste(n,levels(f),sep=sep)
   if(is.null(x) || !is.matrix(x)) return(plev)
   nam <- attr(f,'xnam')
@@ -94,7 +150,7 @@ xlevels <- function(n,f,sep='.') {
 }
 
 nxlevels <- function(n,f) {
-  x <- attr(f,'x')
+  x <- attr(f,'x',exact=TRUE)
   plev <- rep(n,nlevels(f))
   if(is.null(x) || !is.matrix(x)) return(plev)
   nam <- attr(f,'xnam')

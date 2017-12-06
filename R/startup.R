@@ -1,27 +1,29 @@
-# $Id: startup.R 1702 2015-04-29 09:34:44Z sgaure $
-setoption <- function(opt,default) {
-  optnam <- paste('lfe',opt,sep='.')
-  if(!is.null(getOption(optnam))) return()
-  envnam <- paste('LFE',toupper(opt),sep='_')
-  e <- Sys.getenv(envnam)
-  if(e != '') {
-    val <- try(eval(parse(text=e)))
-    if(inherits(val,'try-error')) val <- default
-  } else val <- default
-  ol <- list(val)
-  names(ol) <- optnam
-  do.call(options,ol)
+# $Id: startup.R 1943 2016-04-07 23:08:38Z sgaure $
+
+# set initial options, with defaults. Don't set if already set.
+setoption <- function(...) {
+  arg <- list(...)
+  # don't change an existing option
+  arg <- arg[sapply(paste('lfe',names(arg),sep='.'), function(n) is.null(getOption(n)))]
+  # fill in from environment variable
+  if(length(arg) == 0) return()
+  nm <- names(arg)
+  arg <- lapply(nm, function(n) {
+    e <- Sys.getenv(paste('LFE',toupper(n),sep='_'))
+    if(e != '') {
+      val <- try(eval(parse(text=e)))
+      if(inherits(val, 'try-error')) val <- arg[[n]]
+      val
+    } else arg[[n]]
+  })
+  names(arg) <- paste('lfe',nm,sep='.')
+  do.call(options, arg)
 }
 
 .onLoad <- function(libname,pkgname) {
-  
-  setoption('usecg',FALSE)
-  setoption('eps',1e-8)
-  setoption('pint',300)
-  setoption('accel',1)
-  setoption('bootmem',500)
+  setoption(usecg=FALSE, eps=1e-8, pint=1800L, accel=1L, bootmem=500, etol=c(1e-2,0))
 
-  if(is.null(getOption('lfe.threads'))) {
+  if(is.null(cr <- getOption('lfe.threads'))) {
     cr <- as.integer(Sys.getenv('LFE_THREADS'))
     if(is.na(cr)) cr <- as.integer(Sys.getenv('OMP_NUM_THREADS'))
     if(is.na(cr)) cr <- as.integer(Sys.getenv('OMP_THREAD_LIMIT'))
@@ -32,11 +34,12 @@ setoption <- function(opt,default) {
     }
     options(lfe.threads=cr)
   }
+#  .Call(C_threads,cr)
 }
 
 .onUnload <- function(libpath) {
   options(lfe.usecg=NULL, lfe.eps=NULL,lfe.pint=NULL,lfe.accel=NULL,
-          lfe.bootmem=NULL,lfe.threads=NULL)
+          lfe.bootmem=NULL,lfe.threads=NULL, lfe.etol=NULL)
   library.dynam.unload('lfe',libpath)
 }
 

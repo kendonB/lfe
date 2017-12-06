@@ -1,6 +1,3 @@
-/*
-  $Id: demean.c 1700 2015-04-22 11:36:09Z sgaure $
-*/
 #include "lfe.h"
 /* Need sprintf */
 #include <stdio.h>  
@@ -78,13 +75,14 @@ static R_INLINE void centre(double *v, int N,
 
 
 /*
-  Method of alternating projections.  Input v, output res.
+  Method of alternating projections.  In place in vectors pointed to by vec.
 */
 
-static int demean(double *v, int N, double *res, double *weights,int *scale,
-		  FACTOR *infactors[],int e,double eps, double *means,
+static int demean(int N, double *vec, double *weights,int *scale,
+		  FACTOR *factors[],int e,double eps, double *means,
 		  double *prev, double *prev2,
-		  int *stop,int vecnum, LOCK_T lock, const int gkacc) {
+		  int *stop,int vecnum, LOCK_T lock, const int gkacc,
+		  const int quiet) {
   double delta;
   double norm2 = 0.0;
   int i;
@@ -93,30 +91,27 @@ static int demean(double *v, int N, double *res, double *weights,int *scale,
   double neps;
   int iter;
   int okconv = 1;
-  FACTOR *factors[2*e];
+  //  FACTOR *factors[2*e];
   time_t last, now;
   int lastiter;
 
-  for(int i = 0; i < e; i++) factors[i] = infactors[i];
-  /* make a copy to result vector, centre() is in-place */
-  memcpy(res,v,N*sizeof(double));
   // zero out NaNs
   for(int i = 0; i < N; i++) {
-    if(isnan(res[i])) res[i]=0.0;
+    if(isnan(vec[i])) vec[i]=0.0;
   }
-  if(weights != NULL && scale[0]) for(int i = 0; i < N; i++) res[i] = res[i]*weights[i];
+  if(weights != NULL && scale[0]) for(int i = 0; i < N; i++) vec[i] = vec[i]*weights[i];
 
-  centre(res, N, factors, e, means, weights);
+  centre(vec, N, factors, e, means, weights);
 
   if(e <= 1 || factors[0]->oneiter) {
-    if(weights != NULL && scale[1]) for(int i = 0; i < N; i++) res[i] = res[i]/weights[i];
+    if(weights != NULL && scale[1]) for(int i = 0; i < N; i++) vec[i] = vec[i]/weights[i];
     return(1);
   }
   // Initialize
-  memcpy(prev2, res, N*sizeof(double));
+  memcpy(prev2, vec, N*sizeof(double));
 
   norm2 = 1.0;
-  for(i = 0; i < N; i++) norm2 += res[i]*res[i];
+  for(i = 0; i < N; i++) norm2 += vec[i]*vec[i];
   norm2 = sqrt(norm2);
   delta = prevdelta = 2*norm2;
   neps = norm2*eps;
@@ -125,12 +120,12 @@ static int demean(double *v, int N, double *res, double *weights,int *scale,
   lastiter = 0;
 
   double target=0;
-  if(gkacc) target = 1e-4*neps;
+  target = 1e-4*neps;
   double prevdp=0.0;
   do {
     iter++;
-    if(gkacc) memcpy(prev, res, N*sizeof(double));
-    centre(res,N,factors,e,means, weights);
+    if(gkacc) memcpy(prev, vec, N*sizeof(double));
+    centre(vec,N,factors,e,means, weights);
 
     if(gkacc) {
       // Try the Gearhart-Koshy acceleration, AS 3.2
@@ -142,8 +137,8 @@ static int demean(double *v, int N, double *res, double *weights,int *scale,
       double ip = 0, nm=0, nm2=0;
       for(int i = 0; i < N; i++) {
 	nm += prev[i]*prev[i];
-	ip += prev[i]*(prev[i]-res[i]);
-	nm2 += (prev[i]-res[i])*(prev[i] - res[i]);
+	ip += prev[i]*(prev[i]-vec[i]);
+	nm2 += (prev[i]-vec[i])*(prev[i] - vec[i]);
       }
       if(nm2 > 1e-18*nm) {
 	double t = ip/nm2;
@@ -162,27 +157,15 @@ static int demean(double *v, int N, double *res, double *weights,int *scale,
 	}
 	
 	for(int i = 0; i < N; i++) {
-	  res[i] = t*res[i] + (1.0-t)*prev[i];
+	  vec[i] = t*vec[i] + (1.0-t)*prev[i];
 	}
       }
     }
 
     delta = 0.0;
-    for(int i = 0; i < N; i++) delta += (prev2[i]-res[i])*(prev2[i]-res[i]);
-
-    // make this a power of two, so we don't have to do integer division
-    // Check convergence rate every now and then
-    // For the purpose of computing time to convergence, we assume convergence is linear, 
-    // i.e. that the decrease in norm since the previous iteration is a constant factor c.
-      // compute delta per iter
-    memcpy(prev2,res,N*sizeof(double));
-      // delta is the square norm improvement since last time
-      // we normalize it to be per iteration
-      // we divide it by the number of iterations to get an improvement per iteration
+    for(int i = 0; i < N; i++) delta += (prev2[i]-vec[i])*(prev2[i]-vec[i]);
+    memcpy(prev2,vec,N*sizeof(double));
     delta = sqrt(delta);
-      // then we compute how fast the improvement dimishes. We use this to predict when we're done
-      // for e == 2 without gkacc it should diminish, so that c < 1, but for e > 2 it may
-      // increase, in particular when we do acceleration. Then it is difficult to predict when we will be done
     c = delta/prevdelta;
     /* c is the convergence rate per iteration, at infinity they add up to 1/(1-c).
        This is true for e==2, but also in the ballpark for e>2 we guess.
@@ -203,37 +186,33 @@ static int demean(double *v, int N, double *res, double *weights,int *scale,
       // target should not be smaller than 3 bits of precision in each coordinate
     if(target < N*1e-15) target = N*1e-15;
     now = time(NULL);
-    if(now - last >= 3600 && delta > 0.0) {
+    // should we report?
+    if(quiet > 0 && now - last >= quiet && delta > 0.0) {
       int reqiter;
       double eta;
       char buf[256];
-      // Now, use a c which is based on the medium c since the last print
-      if(prevdp == 0.0)
-	c = delta/prevdelta;
-      else
+      double targ; 
+      if(e > 2 && prevdp != 0.0) {
+	// use an average c if more than 2 factors
 	c = pow(delta/prevdp, 1.0/(iter-lastiter));
-      reqiter = log(target/delta)/log(c);
+	targ = (1.0-c)*neps;
+      } else targ=target;
+
+      reqiter = log(targ/delta)/log(c);
       eta = 1.0*(now-last)*reqiter/(iter-lastiter);
-      if(eta < 0) eta = NA_REAL; 
-      if(gkacc&&0) {
-	sprintf(buf,"...centering vec %d iter %d, delta=%.1e(target %.1e)\n",
-		vecnum,iter,delta,target);
-	
-      } else {
-	time_t arriv = now + (time_t) eta;
-	char timbuf[50];
-	struct tm tmarriv;
+      if(eta < 0) eta = 0;
+
+      time_t arriv = now + (time_t) (eta+1.0);
+      char timbuf[50];
+      struct tm tmarriv;
 #ifdef WIN
-	localtime_s(&tmarriv, &arriv);
+      localtime_s(&tmarriv, &arriv);
 #else
-	localtime_r(&arriv,&tmarriv);
+      localtime_r(&arriv,&tmarriv);
 #endif
-	strftime(timbuf, sizeof(timbuf), "%c", &tmarriv);
-	//	  ctime_r(&arriv, timbuf);
-	sprintf(buf,"...centering vec %d i:%d c:%.1e d:%.1e(t:%.1e) ETA:%s\n",
-		vecnum,iter,1.0-c,delta,target,timbuf);
-	
-      }
+      strftime(timbuf, sizeof(timbuf), "%c", &tmarriv);
+      sprintf(buf,"...centering vec %d i:%d c:%.1e d:%.1e(t:%.1e) ETA:%s\n",
+	      vecnum,iter,1.0-c,delta,target,timbuf);
       pushmsg(buf,lock);
       lastiter = iter;
       prevdp = delta;
@@ -241,7 +220,7 @@ static int demean(double *v, int N, double *res, double *weights,int *scale,
     }
     
     prevdelta = delta;    
-
+    
 #ifdef NOTHREADS
     R_CheckUserInterrupt();
 #else
@@ -249,9 +228,9 @@ static int demean(double *v, int N, double *res, double *weights,int *scale,
     LOCK(lock); stp = *stop; UNLOCK(lock);
     if(stp != 0) {okconv = 0; break;}
 #endif
-
+    
   } while(delta > target);
-  if(weights != NULL && scale[1]) for(int i = 0; i < N; i++) res[i] = res[i]/weights[i];
+  if(weights != NULL && scale[1]) for(int i = 0; i < N; i++) vec[i] = vec[i]/weights[i];
   return(okconv);
 }
 
@@ -298,11 +277,12 @@ static void *demeanlist_thr(void *varg) {
     snprintf(thrname,16, "Ct %d/%d",vecnum+1, arg->K);
     STNAME(thrname);
 #endif
-    okconv = demean(arg->v[vecnum],arg->N,arg->res[vecnum],arg->weights,arg->scale,
+    // If in place, res is pointing to v, otherwise we copy v to res
+    if(arg->res[vecnum] != arg->v[vecnum]) memcpy(arg->res[vecnum],arg->v[vecnum],arg->N*sizeof(double));
+    okconv = demean(arg->N,arg->res[vecnum],arg->weights,arg->scale,
 		    arg->factors,arg->e,arg->eps,means,
 		    tmp1,tmp2,
-		    &arg->stop,vecnum+1,
-		    arg->lock,arg->gkacc);
+		    &arg->stop,vecnum+1,arg->lock,arg->gkacc, arg->quiet);
     now = time(NULL);
     LOCK(arg->lock);
     if(!okconv) {
@@ -527,8 +507,10 @@ SEXP MY_demeanlist(SEXP vlist, SEXP flist, SEXP Ricpt, SEXP Reps,
   int domeans=0;
   int protectcount=0;
   int scale[2];
+  int wraplist = 0;
   // Find the length of the data
   // We are never called with length(flist) == 0
+  //  if(NAMED(vlist) == 0) Rprintf("inplace\n");
   PROTECT(flist = AS_LIST(flist));  protectcount++;
   if(LENGTH(flist) == 0) {
     warning("demeanlist called with length(fl)==0, internal error?");
@@ -537,26 +519,25 @@ SEXP MY_demeanlist(SEXP vlist, SEXP flist, SEXP Ricpt, SEXP Reps,
     N = LENGTH(VECTOR_ELT(flist,0));
 
   if(LENGTH(Rscale) == 1) {
-    scale[0] = LOGICAL(Rscale)[0];
+    scale[0] = LOGICAL(AS_LOGICAL(Rscale))[0];
     scale[1] = scale[0];
   } else if(LENGTH(Rscale) > 1) {
-    scale[0] = LOGICAL(Rscale)[0];
-    scale[1] = LOGICAL(Rscale)[1];
+    scale[0] = LOGICAL(AS_LOGICAL(Rscale))[0];
+    scale[1] = LOGICAL(AS_LOGICAL(Rscale))[1];
   } else {
     error("scale must have length > 2");
   }
-
-  domeans = LOGICAL(Rmeans)[0];
-  vicpt = INTEGER(Ricpt);
+  domeans = LOGICAL(AS_LOGICAL(Rmeans))[0];
+  vicpt = INTEGER(PROTECT(AS_INTEGER(Ricpt)));protectcount++;
   icptlen = LENGTH(Ricpt);
   icpt = vicpt[0] - 1; /* convert from 1-based to zero-based */
-  eps = REAL(Reps)[0];
-  cores = INTEGER(scores)[0];
+  eps = REAL(AS_NUMERIC(Reps))[0];
+  cores = INTEGER(AS_INTEGER(scores))[0];
+  if(cores < 1) cores = 1;
   if(!isNull(Rweights)) {
     if(LENGTH(Rweights) != N) error("Length of weights (%d) must equal length of data (%d)",
 				    LENGTH(Rweights),N);
-    weights = REAL(PROTECT(coerceVector(Rweights, REALSXP)));
-    protectcount++;
+    weights = REAL(PROTECT(AS_NUMERIC(Rweights)));  protectcount++;
   }
 
   //  numfac = LENGTH(flist);
@@ -570,6 +551,14 @@ SEXP MY_demeanlist(SEXP vlist, SEXP flist, SEXP Ricpt, SEXP Reps,
     icpt = -1;
   }
 
+  if(IS_NUMERIC(vlist) || IS_LOGICAL(vlist) || IS_INTEGER(vlist)) {
+    // Just put it in a list to avoid tests further down.
+    SEXP tmp = PROTECT(allocVector(VECSXP,1));
+    protectcount++;
+    SET_VECTOR_ELT(tmp,0,vlist);
+    vlist = tmp;
+    wraplist = 1;
+  }
   PROTECT(vlist = AS_LIST(vlist)); protectcount++;
   listlen = LENGTH(vlist); 
   if(icptlen != 1 && icptlen != listlen)
@@ -609,6 +598,7 @@ SEXP MY_demeanlist(SEXP vlist, SEXP flist, SEXP Ricpt, SEXP Reps,
   vectors = (double **)R_alloc(numvec,sizeof(double*));
   /* Allocate pointers to result vectors */
   target = (double**) R_alloc(numvec,sizeof(double*));
+
   /* Loop through list again to set up result structure */
   cnt = 0;
 
@@ -623,11 +613,16 @@ SEXP MY_demeanlist(SEXP vlist, SEXP flist, SEXP Ricpt, SEXP Reps,
       /* It's a vector */
       SEXP resvec;
       vectors[cnt] = REAL(elt);
-      PROTECT(resvec = allocVector(REALSXP,LENGTH(elt)));
-      SET_VECTOR_ELT(reslist,i,resvec);
-      UNPROTECT(1);
-      SET_NAMES(resvec, GET_NAMES(elt));
-      target[cnt] = REAL(resvec);
+      if(NAMED(vlist) && NAMED(elt) == 0 && !domeans) {
+	SET_VECTOR_ELT(reslist,i,elt);
+	target[cnt] = vectors[cnt];
+      } else {
+	PROTECT(resvec = allocVector(REALSXP,LENGTH(elt)));
+	SET_VECTOR_ELT(reslist,i,resvec);
+	UNPROTECT(1);
+	SET_NAMES(resvec, GET_NAMES(elt));
+	target[cnt] = REAL(resvec);
+      }
       cnt++;
     } else {
       /* It's a matrix */
@@ -638,32 +633,43 @@ SEXP MY_demeanlist(SEXP vlist, SEXP flist, SEXP Ricpt, SEXP Reps,
       /* Allocate a matrix */
       if(icptlen != 1) icpt = vicpt[i]-1;
       if(icpt >= 0 && icpt < cols) rcols--;
-      PROTECT(mtx = allocMatrix(REALSXP,N,rcols));
-      SET_VECTOR_ELT(reslist,i,mtx);
-      UNPROTECT(1);
-      // copy colnames 
-      if(cols == rcols) {
-	SET_DIMNAMES(mtx, GET_DIMNAMES(elt));
-      }
-      /* Set up pointers */
-      rcols = 0;
-      for(j = 0; j < cols; j++) {
-	if(j == icpt) continue;
-	vectors[cnt] = REAL(elt) + j * (mybigint_t)N;
-	target[cnt] = REAL(mtx) + (rcols++) * (mybigint_t)N;
-	cnt++;
+      
+      if(NAMED(vlist) == 0 && NAMED(elt) == 0 && rcols == cols && !domeans) {
+	SET_VECTOR_ELT(reslist,i,elt);
+	for(int j=0; j < cols; j++) {
+	  vectors[cnt] = target[cnt] = REAL(elt) + j*(mybigint_t)N;
+	  cnt++;
+	}
+      } else {
+	PROTECT(mtx = allocMatrix(REALSXP,N,rcols));
+	SET_VECTOR_ELT(reslist,i,mtx);
+	UNPROTECT(1);
+	// copy colnames 
+	if(cols == rcols) {
+	  SET_DIMNAMES(mtx, GET_DIMNAMES(elt));
+	}
+	/* Set up pointers */
+	rcols = 0;
+	for(j = 0; j < cols; j++) {
+	  if(j == icpt) continue;
+	  vectors[cnt] = REAL(elt) + j * (mybigint_t)N;
+	  target[cnt] = REAL(mtx) + (rcols++) * (mybigint_t)N;
+	  cnt++;
+	}
       }
     }
   }
 
   /* Then do stuff */
+
   PROTECT(badconv = allocVector(INTSXP,1));
   setAttrib(reslist,install("badconv"),badconv);
   UNPROTECT(1);
+
   INTEGER(badconv)[0] = demeanlist(vectors,N,numvec,target,weights,scale,
 				   factors,numfac,
-				   eps,cores,INTEGER(quiet)[0],
-				   INTEGER(gkacc)[0]);
+				   eps,cores,INTEGER(AS_INTEGER(quiet))[0],
+				   INTEGER(AS_INTEGER(gkacc))[0]);
 
   if(INTEGER(badconv)[0] > 0)
     warning("%d vectors failed to centre to tolerance %.1le",INTEGER(badconv)[0],eps);
@@ -680,6 +686,8 @@ SEXP MY_demeanlist(SEXP vlist, SEXP flist, SEXP Ricpt, SEXP Reps,
   }
   /* unprotect things */
   UNPROTECT(protectcount);
+  
+  if(wraplist) return(VECTOR_ELT(reslist,0));
   return(reslist);
 }
 
