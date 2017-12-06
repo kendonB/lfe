@@ -661,6 +661,10 @@ newols <- function(mm, stage1=NULL, pf=parent.frame(), nostats=FALSE, exactDOF=F
         cvcv <- .Call(C_sandwich,1.0,inv,meat)
         if(psdef) {
           ev <- eigen(cvcv)
+          if(any(is.complex(ev$values))) {
+            warning('Imaginary component of complex eigenvalues set to zero in multiway clustered variance matrix. See felm(...,psdef=FALSE)')
+            cvcv <- ev$vectors %*% diag(Re(ev$values))) %*% t(ev$vectors)
+          }
           if(any(ev$values < 0)) {
             warning('Negative eigenvalues set to zero in multiway clustered variance matrix. See felm(...,psdef=FALSE)')
             cvcv <- ev$vectors %*% diag(pmax(ev$values,0)) %*% t(ev$vectors)
